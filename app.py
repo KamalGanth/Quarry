@@ -6,6 +6,8 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 import os
+from streamlit import rerun
+
 
 # initialize DB
 init_db()
@@ -31,7 +33,7 @@ def login_page():
             if ok:
                 st.session_state['auth'] = {"logged_in": True, "user": result}
                 st.success(f"Welcome {result['username']} ({result['role']})")
-                st.experimental_rerun()
+                rerun()
             else:
                 st.error(result)
 
@@ -297,4 +299,5 @@ else:
         workers_page()
     elif page == "Environment":
         environment_page()
+
 
