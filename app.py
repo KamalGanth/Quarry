@@ -11,7 +11,7 @@ import os
 init_db()
 
 # optionally use your header image; path from conversation:
-HEADER_IMAGE = "E:\Project_r\Q_m\assets\low-angle-view-of-quarryman-and-assistant-standing-on-stockpile-of-quarried-stone.webp"  # change if you moved assets
+HEADER_IMAGE = "https://imgs.search.brave.com/OcVFeIo49wbja5GMivL3ga5-DNm4QZ31N_6RySpTnac/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly93d3cu/YWdnLW5ldC5jb20v/c2l0ZXMvZGVmYXVs/dC9maWxlcy9zdHls/ZXMvYWdnbmV0X2dh/bGxlcnlfZnVsbF9p/bWFnZV9wcmVzZXQv/cHVibGljLzIwMjUt/MDIvY292ZXJfcW0t/ZmViLTIwMjUuanBn/P2l0b2s9YlRjQktE/QTA"  # change if you moved assets
 
 st.set_page_config(page_title="Quarry Ops", layout="wide")
 
@@ -297,3 +297,4 @@ else:
         workers_page()
     elif page == "Environment":
         environment_page()
+
