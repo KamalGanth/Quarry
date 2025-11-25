@@ -1,19 +1,22 @@
 # app.py
 import streamlit as st
-from db import init_db, create_user, authenticate_user, insert_production, fetch_all, insert_equipment, update_equipment, insert_inventory, insert_worker, insert_environment
+from db import (
+    init_db, create_user, authenticate_user,
+    insert_production, fetch_all, insert_equipment,
+    update_equipment, insert_inventory, insert_worker,
+    insert_environment, fetch_users, clear_all_data
+)
 from utils import rows_to_df, export_dataframe
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
 import os
-from streamlit import rerun
 
-
-# initialize DB
+# initialize DB and default admin
 init_db()
 
-# optionally use your header image; path from conversation:
-HEADER_IMAGE = "https://imgs.search.brave.com/OcVFeIo49wbja5GMivL3ga5-DNm4QZ31N_6RySpTnac/rs:fit:500:0:1:0/g:ce/aHR0cHM6Ly93d3cu/YWdnLW5ldC5jb20v/c2l0ZXMvZGVmYXVs/dC9maWxlcy9zdHls/ZXMvYWdnbmV0X2dh/bGxlcnlfZnVsbF9p/bWFnZV9wcmVzZXQv/cHVibGljLzIwMjUt/MDIvY292ZXJfcW0t/ZmViLTIwMjUuanBn/P2l0b2s9YlRjQktE/QTA"  # change if you moved assets
+# header image (place your header file at assets/header.webp)
+HEADER_IMAGE = "assets/header.webp"
 
 st.set_page_config(page_title="Quarry Ops", layout="wide")
 
@@ -21,9 +24,32 @@ st.set_page_config(page_title="Quarry Ops", layout="wide")
 if 'auth' not in st.session_state:
     st.session_state['auth'] = {"logged_in": False, "user": None}
 
+# --- Utility time helpers (for numeric AM/PM inputs) ---
+def convert_to_24h(hour, minute, meridiem):
+    hour = int(hour)
+    minute = int(minute)
+    if meridiem == "PM" and hour != 12:
+        hour += 12
+    if meridiem == "AM" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}:00"
+
+def calculate_running_time(start_24, end_24):
+    try:
+        fmt = "%H:%M:%S"
+        t1 = datetime.strptime(start_24, fmt)
+        t2 = datetime.strptime(end_24, fmt)
+        diff = (t2 - t1).total_seconds() / 3600
+        # if negative (end before start) treat as 0
+        return round(max(diff, 0), 4)
+    except:
+        return 0.0
+
+# --- Auth / login page ---
 def login_page():
     st.title("Quarry Ops — Sign In")
-    st.image(HEADER_IMAGE, use_column_width=True)
+    if os.path.exists(HEADER_IMAGE):
+        st.image(HEADER_IMAGE, use_container_width=True)
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -33,38 +59,48 @@ def login_page():
             if ok:
                 st.session_state['auth'] = {"logged_in": True, "user": result}
                 st.success(f"Welcome {result['username']} ({result['role']})")
-                rerun()
+                st.rerun()
             else:
                 st.error(result)
 
     st.markdown("---")
-    st.subheader("Sign up")
+    st.subheader("Sign up (create a user account)")
     with st.form("signup_form"):
         new_user = st.text_input("New username")
         new_pass = st.text_input("New password", type="password")
-        role = st.selectbox("Role", ["user", "admin"])
+        role = st.selectbox("Role", ["user"])  # only users can be registered via UI
         create = st.form_submit_button("Create account")
         if create:
-            ok, msg = create_user(new_user, new_pass, role=role)
-            if ok:
-                st.success("Account created — you can sign in now")
+            if not new_user or not new_pass:
+                st.error("Provide username and password")
             else:
-                st.error(msg)
+                ok, msg = create_user(new_user, new_pass, role=role)
+                if ok:
+                    st.success("Account created — you can sign in now")
+                else:
+                    st.error(msg)
 
 def logout():
     st.session_state['auth'] = {"logged_in": False, "user": None}
-    st.experimental_rerun()
+    st.rerun()
 
 # --- Pages ---
 def dashboard_page():
     st.title("Dashboard")
-    st.image(HEADER_IMAGE, use_column_width=True)
-    # KPI cards
-    # Pull counts and stats
-    prod_rows = fetch_all("production")
-    equip_rows = fetch_all("equipment")
-    inv_rows = fetch_all("inventory")
-    env_rows = fetch_all("environment")
+    if os.path.exists(HEADER_IMAGE):
+        st.image(HEADER_IMAGE, use_container_width=True)
+    # Pull counts and stats (admin sees global, user sees own)
+    user = st.session_state['auth']['user']
+    if user['role'] == 'admin':
+        prod_rows = fetch_all("production")
+        equip_rows = fetch_all("equipment")
+        inv_rows = fetch_all("inventory")
+        env_rows = fetch_all("environment")
+    else:
+        prod_rows = fetch_all("production", username=user['username'])
+        equip_rows = fetch_all("equipment", username=user['username'])
+        inv_rows = fetch_all("inventory", username=user['username'])
+        env_rows = fetch_all("environment", username=user['username'])
 
     total_stockpile = sum([r.get("quantity", 0) or 0 for r in inv_rows])
     running_equipment = sum(1 for r in equip_rows if r.get("status") == "Running")
@@ -83,9 +119,8 @@ def dashboard_page():
     st.subheader("Production Timeline (last 24 records)")
     dfp = rows_to_df(prod_rows).head(24)
     if not dfp.empty:
-        # convert timestamps to datetime
         dfp['ts'] = pd.to_datetime(dfp['timestamp'])
-        fig = px.line(dfp.sort_values('ts'), x='ts', y='hourly_tons', title="Hourly Production (tons)")
+        fig = px.line(dfp.sort_values('ts'), x='ts', y='hourly_tons', title="Hourly Production (m³)")
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(dfp[['timestamp','hourly_tons','daily_tons']])
     else:
@@ -94,15 +129,22 @@ def dashboard_page():
 def production_page():
     st.title("Production Management")
     st.subheader("Record Production Data")
+
+    user = st.session_state['auth']['user']
+
     with st.form("prod_form"):
-        hourly = st.number_input("Hourly Production (tons)", min_value=0.0, step=0.1, value=0.0)
-        daily = st.number_input("Daily Production (tons)", min_value=0.0, step=0.1, value=0.0)
-        bw = st.number_input("Block Width (m)", value=0.0, step=0.1)
-        bh = st.number_input("Block Height (m)", value=0.0, step=0.1)
-        bl = st.number_input("Block Length (m)", value=0.0, step=0.1)
-        lat = st.text_input("Latitude", value="0.0")
-        lon = st.text_input("Longitude", value="0.0")
+        hourly = st.number_input("Hourly Production (m³)", min_value=0.0, step=0.1)
+        daily = st.number_input("Daily Production (m³)", min_value=0.0, step=0.1)
+
+        bw = st.number_input("Block Width (m)", min_value=0.0, step=0.1)
+        bh = st.number_input("Block Height (m)", min_value=0.0, step=0.1)
+        bl = st.number_input("Block Length (m)", min_value=0.0, step=0.1)
+
+        block_volume = bw * bh * bl
+        st.info(f"📦 **Block Volume:** {block_volume:.2f} m³ (auto-calculated)")
+
         notes = st.text_area("Notes")
+
         save = st.form_submit_button("Save Production Data")
         if save:
             rec = {
@@ -112,16 +154,20 @@ def production_page():
                 "block_w": bw,
                 "block_h": bh,
                 "block_l": bl,
-                "latitude": float(lat) if lat else None,
-                "longitude": float(lon) if lon else None,
-                "notes": notes
+                "block_volume": block_volume,
+                "notes": notes,
+                "username": user['username']
             }
             insert_production(rec)
             st.success("Production record saved")
 
     st.markdown("---")
     st.subheader("Production Timeline & Export")
-    prod_rows = fetch_all("production")
+    if user['role'] == 'admin':
+        prod_rows = fetch_all("production")
+    else:
+        prod_rows = fetch_all("production", username=user['username'])
+
     df = rows_to_df(prod_rows)
     if not df.empty:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -136,32 +182,66 @@ def production_page():
         st.info("No production data yet.")
 
 def equipment_page():
-    st.title("Equipment Monitoring")
-    st.subheader("Update Equipment Status")
+    st.title("⚙️ Equipment Management")
+
+    user = st.session_state['auth']['user']
+
     with st.form("equip_form"):
-        eid = st.text_input("Equipment ID", value="EXC-001")
-        name = st.text_input("Name", value="Excavator Alpha")
-        status = st.selectbox("Status", ["Running", "Idle", "Maintenance"])
-        hours = st.number_input("Running Hours", min_value=0.0, step=0.1)
+        equipment_type = st.selectbox(
+            "Equipment Type",
+            ["Dumper", "Excavator", "Wiresaw Machine", "Line Driller", "Sackhammer Drill"]
+        )
+
+        equipment_id = st.text_input("Equipment ID")
+
+        st.subheader("Start Time")
+        col1, col2, col3 = st.columns(3)
+        start_hr = col1.number_input("Hour", 1, 12, key="e_start_hr")
+        start_min = col2.number_input("Minute", 0, 59, key="e_start_min")
+        start_ap = col3.selectbox("AM/PM", ["AM", "PM"], key="e_start_ap")
+
+        st.subheader("End Time")
+        col1, col2, col3 = st.columns(3)
+        end_hr = col1.number_input("Hour ", 1, 12, key="e_end_hr")
+        end_min = col2.number_input("Minute ", 0, 59, key="e_end_min")
+        end_ap = col3.selectbox("AM/PM ", ["AM", "PM"], key="e_end_ap")
+
+        start_24 = convert_to_24h(start_hr, start_min, start_ap)
+        end_24 = convert_to_24h(end_hr, end_min, end_ap)
+
+        running_hours = calculate_running_time(start_24, end_24)
+        st.info(f"Running Time: **{running_hours:.2f} hours**")
+
+        status = st.selectbox("Status", ["Idle", "Running", "Maintenance", "Breakdown"])
+
         prod = st.number_input("Production (tons)", min_value=0.0, step=0.1)
-        add = st.form_submit_button("Add / Update Equipment")
-        if add:
-            # optimistic: if equipment exists, update else insert
-            existing = [r for r in fetch_all("equipment") if r.get("equipment_id") == eid]
-            if existing:
-                update_equipment(eid, status, hours, prod)
-                st.success("Equipment updated")
-            else:
-                insert_equipment({"equipment_id": eid, "name": name, "status": status, "running_hours": hours, "production_tons": prod})
-                st.success("Equipment added")
+
+        save = st.form_submit_button("Save Equipment")
+        if save:
+            rec = {
+                "equipment_type": equipment_type,
+                "equipment_id": equipment_id,
+                "status": status,
+                "start_time": start_24,
+                "end_time": end_24,
+                "running_time": running_hours,
+                "production_tons": prod,
+                "username": user['username']
+            }
+            insert_equipment(rec)
+            st.success("Equipment record saved")
 
     st.markdown("---")
-    st.subheader("Equipment Status Overview")
-    eq_rows = fetch_all("equipment")
+    st.subheader("Equipment Records")
+    if user['role'] == 'admin':
+        eq_rows = fetch_all("equipment")
+    else:
+        eq_rows = fetch_all("equipment", username=user['username'])
+
     dfe = rows_to_df(eq_rows)
     if not dfe.empty:
         st.dataframe(dfe)
-        fig = px.bar(dfe, x='name', y='running_hours', color='status', title="Equipment running hours")
+        fig = px.bar(dfe, x='equipment_id', y='running_time', color='status', title="Equipment running hours")
         st.plotly_chart(fig, use_container_width=True)
         if st.button("Export Equipment to Excel"):
             path = export_dataframe(dfe, prefix="equipment")
@@ -173,9 +253,11 @@ def equipment_page():
 def inventory_page():
     st.title("Inventory & Stockpile")
     st.subheader("Add Inventory Entry")
+    user = st.session_state['auth']['user']
+
     with st.form("inv_form"):
         location = st.text_input("Stockpile Location", value="Block Yard A")
-        material_type = st.selectbox("Material Type / Grade", ["Rough Block", "Finished Slab", "Aggregate", "Other"])
+        material_type = st.selectbox("Material Type", ["Overburden", "Rough Block", "Finished Slab", "Aggregate", "Other"])
         quantity = st.number_input("Quantity", min_value=0.0, step=1.0)
         unit = st.selectbox("Unit", ["m³", "tons", "pieces"])
         date_stocked = st.date_input("Date of Stocking")
@@ -186,13 +268,18 @@ def inventory_page():
                 "material_type": material_type,
                 "quantity": quantity,
                 "unit": unit,
-                "date_stocked": date_stocked.isoformat()
+                "date_stocked": date_stocked.isoformat(),
+                "username": user['username']
             })
             st.success("Inventory added")
 
     st.markdown("---")
     st.subheader("Current Inventory")
-    inv_rows = fetch_all("inventory")
+    if user['role'] == 'admin':
+        inv_rows = fetch_all("inventory")
+    else:
+        inv_rows = fetch_all("inventory", username=user['username'])
+
     dfi = rows_to_df(inv_rows)
     if not dfi.empty:
         st.dataframe(dfi)
@@ -206,28 +293,56 @@ def inventory_page():
         st.info("No inventory data yet.")
 
 def workers_page():
-    st.title("Workers")
-    st.subheader("Add Worker")
+    st.title("👷 Workers Management")
+    user = st.session_state['auth']['user']
+
     with st.form("worker_form"):
-        name = st.text_input("Name")
-        role = st.text_input("Role (e.g., Operator)")
-        shift = st.selectbox("Shift", ["Morning", "Evening", "Night"])
-        contact = st.text_input("Contact")
-        hired_on = st.date_input("Hired On")
-        add = st.form_submit_button("Add Worker")
+        worker_name = st.text_input("Worker Name")
+        role = st.text_input("Designation")
+        shift = st.selectbox("Shift", ["Shift 1", "Shift 2", "Shift 3"])
+
+        st.subheader("Start Time")
+        col1, col2, col3 = st.columns(3)
+        start_hr = col1.number_input("Hour", 1, 12, key="w_start_hr")
+        start_min = col2.number_input("Minute", 0, 59, key="w_start_min")
+        start_ap = col3.selectbox("AM/PM", ["AM", "PM"], key="w_start_ap")
+
+        st.subheader("End Time")
+        col1, col2, col3 = st.columns(3)
+        end_hr = col1.number_input("Hour ", 1, 12, key="w_end_hr")
+        end_min = col2.number_input("Minute ", 0, 59, key="w_end_min")
+        end_ap = col3.selectbox("AM/PM ", ["AM", "PM"], key="w_end_ap")
+
+        start_24 = convert_to_24h(start_hr, start_min, start_ap)
+        end_24 = convert_to_24h(end_hr, end_min, end_ap)
+        working_hours = calculate_running_time(start_24, end_24)
+        st.info(f"Working Hours: **{working_hours:.2f} hours**")
+
+        working_place = st.text_input("Working Place")
+        hired_date = st.date_input("Date")
+
+        add = st.form_submit_button("Save Worker")
         if add:
             insert_worker({
-                "name": name,
+                "name": worker_name,
                 "role": role,
                 "shift": shift,
-                "contact": contact,
-                "hired_on": hired_on.isoformat()
+                "start_time": start_24,
+                "end_time": end_24,
+                "working_hours": working_hours,
+                "working_place": working_place,
+                "hired_on": hired_date.isoformat(),
+                "username": user['username']
             })
-            st.success("Worker added")
+            st.success("Worker record added successfully!")
 
     st.markdown("---")
     st.subheader("Workers List")
-    wk = fetch_all("workers")
+    if user['role'] == 'admin':
+        wk = fetch_all("workers")
+    else:
+        wk = fetch_all("workers", username=user['username'])
+
     dfw = rows_to_df(wk)
     if not dfw.empty:
         st.dataframe(dfw)
@@ -240,7 +355,8 @@ def workers_page():
 
 def environment_page():
     st.title("Environment Logs")
-    st.subheader("Record Environmental Data")
+    user = st.session_state['auth']['user']
+
     with st.form("env_form"):
         noise = st.number_input("Noise Level (dB)", min_value=0.0, step=0.1)
         air_quality = st.selectbox("Air Quality", ["Good", "Moderate", "Poor"])
@@ -255,13 +371,18 @@ def environment_page():
                 "air_quality": air_quality,
                 "water_usage_l": water,
                 "compliance_status": compliance,
-                "notes": notes
+                "notes": notes,
+                "username": user['username']
             })
             st.success("Environmental log saved")
 
     st.markdown("---")
     st.subheader("Environmental Logs History")
-    env_rows = fetch_all("environment")
+    if user['role'] == 'admin':
+        env_rows = fetch_all("environment")
+    else:
+        env_rows = fetch_all("environment", username=user['username'])
+
     dfe = rows_to_df(env_rows)
     if not dfe.empty:
         dfe['timestamp'] = pd.to_datetime(dfe['timestamp'])
@@ -275,6 +396,36 @@ def environment_page():
     else:
         st.info("No environment logs yet.")
 
+# --- Admin page to view all users data and Clear DB ---
+def admin_page():
+    st.title("🔐 Admin Dashboard")
+
+    st.markdown("### Registered users")
+    users = fetch_users()
+    if users:
+        for u in users:
+            st.write(f"#### 👤 {u['username']}")
+            st.write("**Production**")
+            st.dataframe(rows_to_df(fetch_all("production", username=u['username'])))
+            st.write("**Equipment**")
+            st.dataframe(rows_to_df(fetch_all("equipment", username=u['username'])))
+            st.write("**Inventory**")
+            st.dataframe(rows_to_df(fetch_all("inventory", username=u['username'])))
+            st.write("**Workers**")
+            st.dataframe(rows_to_df(fetch_all("workers", username=u['username'])))
+            st.write("**Environment**")
+            st.dataframe(rows_to_df(fetch_all("environment", username=u['username'])))
+            st.markdown("---")
+    else:
+        st.info("No registered users")
+
+    st.markdown("### Dangerous Admin Operations")
+    st.warning("Clearing the DB will remove all production/equipment/inventory/workers/environment data (users are preserved).")
+    if st.button("Clear DB (delete all data)"):
+        clear_all_data()
+        st.success("All data tables cleared.")
+        st.rerun()
+
 # --- Main app flow ---
 if not st.session_state['auth']["logged_in"]:
     login_page()
@@ -282,7 +433,10 @@ else:
     user = st.session_state['auth']["user"]
     st.sidebar.title("Quarry Ops")
     st.sidebar.write(f"Signed in as **{user['username']}** ({user['role']})")
-    page = st.sidebar.radio("Navigation", ["Dashboard", "Production", "Equipment", "Inventory", "Workers", "Environment", "Logout"])
+    if user['role'] == 'admin':
+        page = st.sidebar.radio("Navigation", ["Dashboard", "Production", "Equipment", "Inventory", "Workers", "Environment", "Admin", "Logout"])
+    else:
+        page = st.sidebar.radio("Navigation", ["Dashboard", "Production", "Equipment", "Inventory", "Workers", "Environment", "Logout"])
 
     if page == "Logout":
         if st.sidebar.button("Sign out"):
@@ -299,5 +453,5 @@ else:
         workers_page()
     elif page == "Environment":
         environment_page()
-
-
+    elif page == "Admin":
+        admin_page()
